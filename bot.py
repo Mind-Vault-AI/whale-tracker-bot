@@ -35,11 +35,15 @@ WHALE_WALLETS = {
     "0x75e89d5979e4f6fba9f97c104c2f0afb3f1dcb88": "MEXC",
 }
 
-# User subscriptions storage (in production: use database)
+# User settings storage (in production: use database)
 user_subscriptions = {}
+user_settings = {}
+
+# Default settings
+DEFAULT_THRESHOLD = 100
+AVAILABLE_CHAINS = ["ETH", "BSC", "ARB", "MATIC", "SOL"]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Send welcome message with menu."""
     keyboard = [
         [InlineKeyboardButton("🐋 Live Whale Alerts", callback_data="alerts_on")],
         [InlineKeyboardButton("📊 Top Wallets", callback_data="top_wallets")],
@@ -55,10 +59,10 @@ Track whale wallets in real-time.
 Follow the smart money.
 
 *Features:*
-• Real-time whale alerts
-• Multi-chain tracking
-• Copy trade signals
-• Risk management alerts
+- Real-time whale alerts
+- Multi-chain tracking
+- Copy trade signals
+- Risk management alerts
 
 Select an option below:
 """
@@ -69,11 +73,13 @@ Select an option below:
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle button callbacks."""
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
+    
+    if user_id not in user_settings:
+        user_settings[user_id] = {"threshold": DEFAULT_THRESHOLD, "chains": ["ETH"]}
     
     if query.data == "alerts_on":
         user_subscriptions[user_id] = True
@@ -111,6 +117,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             parse_mode="Markdown"
         )
     
+    elif query.data == "threshold":
+        current = user_settings[user_id]["threshold"]
+        keyboard = [
+            [
+                InlineKeyboardButton("50 ETH", callback_data="thresh_50"),
+                InlineKeyboardButton("100 ETH", callback_data="thresh_100"),
+            ],
+            [
+                InlineKeyboardButton("500 ETH", callback_data="thresh_500"),
+                InlineKeyboardButton("1000 ETH", callback_data="thresh_1000"),
+            ],
+            [InlineKeyboardButton("🔙 Back to Settings", callback_data="settings")],
+        ]
+        await query.edit_message_text(
+            f"🔔 *Alert Threshold*\n\n"
+            f"Current: *{current} ETH*\n\n"
+            f"Only receive alerts for transfers above this amount.\n"
+            f"Select new threshold:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    
+    elif query.data.startswith("thresh_"):
+        value = int(query.data.split("_")[1])
+        user_settings[user_id]["threshold"] = value
+        await query.edit_message_text(
+            f"✅ *Threshold Updated*\n\n"
+            f"New threshold: *{value} ETH*\n\n"
+            f"You'll only receive alerts for transfers ≥ {value} ETH.",
+            parse_mode="Markdown"
+        )
+    
+    elif query.data == "chains":
+        current_chains = user_settings[user_id]["chains"]
+        keyboard = []
+        for chain in AVAILABLE_CHAINS:
+            status = "✅" if chain in current_chains else "⬜"
+            keyboard.append([InlineKeyboardButton(f"{status} {chain}", callback_data=f"chain_{chain}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back to Settings", callback_data="settings")])
+        
+        await query.edit_message_text(
+            f"⛓️ *Chain Selection*\n\n"
+            f"Active: *{', '.join(current_chains)}*\n\n"
+            f"Tap to toggle chains:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    
+    elif query.data.startswith("chain_"):
+        chain = query.data.split("_")[1]
+        current_chains = user_settings[user_id]["chains"]
+        
+        if chain in current_chains:
+            if len(current_chains) > 1:
+                current_chains.remove(chain)
+        else:
+            current_chains.append(chain)
+        
+        user_settings[user_id]["chains"] = current_chains
+        
+        keyboard = []
+        for c in AVAILABLE_CHAINS:
+            status = "✅" if c in current_chains else "⬜"
+            keyboard.append([InlineKeyboardButton(f"{status} {c}", callback_data=f"chain_{c}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back to Settings", callback_data="settings")])
+        
+        await query.edit_message_text(
+            f"⛓️ *Chain Selection*\n\n"
+            f"Active: *{', '.join(current_chains)}*\n\n"
+            f"Tap to toggle chains:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    
     elif query.data == "back":
         keyboard = [
             [InlineKeyboardButton("🐋 Live Whale Alerts", callback_data="alerts_on")],
@@ -125,7 +205,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 async def fetch_recent_transfers() -> str:
-    """Fetch recent large transfers from Etherscan."""
     if not ETHERSCAN_API_KEY:
         return "📊 *Recent Large Transfers*\n\n" \
                "⚠️ API key not configured.\n" \
@@ -135,7 +214,6 @@ async def fetch_recent_transfers() -> str:
                "• Whale → Coinbase: 850 ETH"
     
     try:
-        # Fetch from first tracked wallet as example
         wallet = list(WHALE_WALLETS.keys())[0]
         url = f"https://api.etherscan.io/api?module=account&action=txlist&address={wallet}&startblock=0&endblock=99999999&page=1&offset=5&sort=desc&apikey={ETHERSCAN_API_KEY}"
         
@@ -159,7 +237,6 @@ async def fetch_recent_transfers() -> str:
         return "⚠️ Error fetching data. Please try again."
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Stop whale alerts for user."""
     user_id = update.effective_user.id
     user_subscriptions[user_id] = False
     await update.message.reply_text(
@@ -168,7 +245,6 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show bot status."""
     active_users = sum(1 for v in user_subscriptions.values() if v)
     await update.message.reply_text(
         f"📈 *Bot Status*\n\n"
@@ -179,33 +255,24 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode="Markdown"
     )
 
-async def health_check(request):
-    """Health check endpoint for Koyeb."""
-    return aiohttp.web.Response(text="OK")
-
 async def main() -> None:
-    """Start the bot."""
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN not set!")
         return
     
-    # Create application
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stop", stop))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    # Start bot with webhook for Koyeb
     logger.info(f"Starting bot on port {PORT}")
     
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
     
-    # Keep running
     while True:
         await asyncio.sleep(3600)
 
