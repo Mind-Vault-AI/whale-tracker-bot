@@ -78,7 +78,7 @@ THRESHOLD_KEYBOARD = {
     'inline_keyboard': [
         [{'text': '50 ETH', 'callback_data': 'threshold_50'}, {'text': '100 ETH', 'callback_data': 'threshold_100'}],
         [{'text': '500 ETH', 'callback_data': 'threshold_500'}, {'text': '1000 ETH', 'callback_data': 'threshold_1000'}],
-        [{'text': '« Terug', 'callback_data': 'back_main'}]
+        [{'text': '🔙 Back to Settings', 'callback_data': 'settings'}]
     ]
 }
 
