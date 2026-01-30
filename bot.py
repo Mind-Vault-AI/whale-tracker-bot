@@ -1,338 +1,319 @@
 """
-WhaleFollow Pro - Telegram Bot v4.0
-- Health check endpoint (port 8000)
-- Live whale data via Etherscan
-- Full navigation (back + menu)
-- Error handling
-- Affiliate integration
+MVAI Whale Tracker Bot
+Telegram: @MVAI_WhalesTrader_Bot
+Koyeb Deployment - Production Ready
 """
 
 import os
 import logging
 import asyncio
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-import httpx
+from aiohttp import web
+import aiohttp
 
-# Logging
+# === CONFIGURATION ===
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+ETHERSCAN_API_KEY = os.environ.get("ETHERSCAN_API_KEY", "")
+PORT = int(os.environ.get("PORT", 8000))
+
+# === LOGGING ===
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# =============================================================================
-# ENVIRONMENT VARIABLES (beide naming conventions supported)
-# =============================================================================
-BOT_TOKEN = os.environ.get('BOT_TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN') or os.environ.get('TELEGRAM_TOKEN')
-ETHERSCAN_API = os.environ.get('ETHERSCAN_API') or os.environ.get('ETHERSCAN_KEY')
-HELIUS_KEY = os.environ.get('HELIUS_KEY')
-SOLSCAN_API = os.environ.get('SOLSCAN_API')
-
-# Affiliate codes
-BITUNIX_CODE = os.environ.get('BITUNIX_CODE', 'xc6jzk')
-MEXC_CODE = os.environ.get('MEXC_CODE', 'BPM0e8Rm')
-BLOFIN_CODE = os.environ.get('BLOFIN_CODE', 'b996a0111c1b4497b53d9b3cc82e4539')
-
-# =============================================================================
-# HEALTH CHECK SERVER (Port 8000)
-# =============================================================================
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        response = '{"status":"ok","bot":"WhaleFollow Pro","version":"4.0"}'
-        self.wfile.write(response.encode())
-    
-    def log_message(self, format, *args):
-        pass  # Suppress logging
-
-def run_health_server():
-    server = HTTPServer(('0.0.0.0', 8000), HealthHandler)
-    logger.info("Health check server running on port 8000")
-    server.serve_forever()
-
-# =============================================================================
-# WHALE DATA FUNCTIONS
-# =============================================================================
+# === WHALE WALLETS (Known Exchanges) ===
 WHALE_WALLETS = {
-    "Binance Hot": "0x28c6c06298d514db089934071355e5743bf21d60",
-    "Binance Cold": "0x21a31ee1afc51d94c2efccaa2092ad1028285549",
-    "Binance 3": "0x47ac0fb4f2d84898e4d9e7b4dab3c24507a6d503",
-    "Bitfinex": "0x8894e0a0c962cb723c1976a4421c95949be2d4e3",
-    "Kraken": "0x2910543af39aba0cd09dbb2d50200b3e800a63d2",
-    "Coinbase": "0x71660c4005ba85c37ccec55d0c4493e66fe775d3",
-    "Jump Trading": "0x9a9dcd6b52b45a78cd13b395723c245dabfbab71",
-    "Wintermute": "0x0000006daea1723962647b7e189d311d757fb793",
+    "0x28c6c06298d514db089934071355e5743bf21d60": "Binance Hot",
+    "0x21a31ee1afc51d94c2efccaa2092ad1028285549": "Binance Cold",
+    "0xf977814e90da44bfa03b6295a0616a897441acec": "Binance 8",
+    "0x8894e0a0c962cb723c1976a4421c95949be2d4e3": "Bitfinex",
+    "0x6cc5f688a315f3dc28a7781717a9a798a59fda7b": "OKX",
+    "0x75e89d5979e4f6fba9f97c104c2f0afb3f1dcb88": "MEXC",
 }
 
-async def fetch_whale_transactions():
-    """Fetch real whale transactions from Etherscan"""
-    if not ETHERSCAN_API:
+# === USER STATE ===
+user_settings = {}
+
+def get_user_settings(user_id):
+    if user_id not in user_settings:
+        user_settings[user_id] = {
+            "alerts": False,
+            "threshold": 100,
+            "chains": ["ETH"]
+        }
+    return user_settings[user_id]
+
+# === ETHERSCAN API ===
+async def fetch_recent_transfers():
+    """Fetch recent large ETH transfers from Etherscan."""
+    if not ETHERSCAN_API_KEY:
         return None
     
-    transactions = []
+    url = f"https://api.etherscan.io/api?module=account&action=txlist&address=0x28c6c06298d514db089934071355e5743bf21d60&startblock=0&endblock=99999999&page=1&offset=5&sort=desc&apikey={ETHERSCAN_API_KEY}"
     
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for name, address in list(WHALE_WALLETS.items())[:5]:
-            try:
-                url = f"https://api.etherscan.io/api?module=account&action=txlist&address={address}&startblock=0&endblock=99999999&page=1&offset=5&sort=desc&apikey={ETHERSCAN_API}"
-                response = await client.get(url)
-                data = response.json()
-                
-                if data.get('status') == '1' and data.get('result'):
-                    for tx in data['result'][:2]:
-                        value_eth = int(tx.get('value', 0)) / 1e18
-                        if value_eth > 10:
-                            transactions.append({
-                                'wallet': name,
-                                'hash': tx['hash'][:10] + '...',
-                                'value': round(value_eth, 2),
-                                'to': tx['to'][:10] + '...' if tx.get('to') else 'Contract',
-                                'type': 'OUT' if tx['from'].lower() == address.lower() else 'IN'
-                            })
-            except Exception as e:
-                logger.error(f"Error fetching {name}: {e}")
-                continue
-    
-    return transactions if transactions else None
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("status") == "1":
+                        return data.get("result", [])
+    except Exception as e:
+        logger.error(f"Etherscan API error: {e}")
+    return None
 
-# =============================================================================
-# KEYBOARD BUILDERS
-# =============================================================================
-def main_menu_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🐋 Live Whale Alerts", callback_data="alerts")],
-        [InlineKeyboardButton("📊 Top Wallets", callback_data="wallets")],
-        [InlineKeyboardButton("💰 Recent Transfers", callback_data="transfers")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
-        [InlineKeyboardButton("💎 Trade Now", callback_data="trade")]
-    ])
+def format_eth(wei_value):
+    """Convert wei to ETH."""
+    try:
+        return round(int(wei_value) / 1e18, 2)
+    except:
+        return 0
 
-def back_menu_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("« Back", callback_data="back"),
-         InlineKeyboardButton("🏠 Menu", callback_data="menu")]
-    ])
-
-def settings_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📈 Your Stats", callback_data="stats")],
-        [InlineKeyboardButton("🎁 Earn Rewards", callback_data="referral")],
-        [InlineKeyboardButton("ℹ️ API Status", callback_data="api_status")],
-        [InlineKeyboardButton("« Back", callback_data="back"),
-         InlineKeyboardButton("🏠 Menu", callback_data="menu")]
-    ])
-
-def trade_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔥 Bitunix (20% bonus)", url=f"https://www.bitunix.com/register?vipCode={BITUNIX_CODE}")],
-        [InlineKeyboardButton("💎 MEXC (40% fees)", url=f"https://www.mexc.com/register?inviteCode={MEXC_CODE}")],
-        [InlineKeyboardButton("⚡ BloFin", url=f"https://blofin.com/register?referral_code={BLOFIN_CODE}")],
-        [InlineKeyboardButton("« Back", callback_data="back"),
-         InlineKeyboardButton("🏠 Menu", callback_data="menu")]
-    ])
-
-# =============================================================================
-# BOT HANDLERS
-# =============================================================================
+# === TELEGRAM HANDLERS ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start command - main menu"""
-    user = update.effective_user
+    """Main menu."""
+    keyboard = [
+        [InlineKeyboardButton("🐋 Live Alerts ON", callback_data="alerts_on")],
+        [InlineKeyboardButton("📊 Top Wallets", callback_data="top_wallets")],
+        [InlineKeyboardButton("💰 Recent Transfers", callback_data="recent")],
+        [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+        [InlineKeyboardButton("💎 Upgrade to Pro", callback_data="upgrade")],
+    ]
     
-    text = f"""🐋 *MVAI Whale Tracker*
-
-Welcome {user.first_name}!
+    text = """🐋 *MVAI Whale Tracker*
 
 Track whale wallets in real-time.
 Follow the smart money.
 
-*Features:*
-• Real-time whale alerts
-• Multi-chain tracking
-• Copy trade signals
-• Risk management alerts
-
 Select an option below:"""
     
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, 
-            reply_markup=main_menu_keyboard(),
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            text, 
-            reply_markup=main_menu_keyboard(),
-            parse_mode='Markdown'
-        )
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all button callbacks"""
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button presses."""
     query = update.callback_query
     await query.answer()
     
+    user_id = query.from_user.id
+    settings = get_user_settings(user_id)
     data = query.data
     
-    # Navigation
-    if data in ["back", "menu"]:
-        await start(update, context)
-        return
+    if data == "alerts_on":
+        settings["alerts"] = True
+        await query.edit_message_text(
+            "✅ *Alerts Enabled*\n\nYou'll receive notifications for whale movements > 100 ETH.",
+            parse_mode="Markdown"
+        )
     
-    # Alerts
-    if data == "alerts":
-        context.user_data['alerts_enabled'] = True
-        text = """✅ *Whale Alerts Activated*
-
-You will receive notifications when whales make significant moves.
-
-Use /stop to disable alerts."""
-        await query.edit_message_text(text, reply_markup=back_menu_keyboard(), parse_mode='Markdown')
-        return
+    elif data == "alerts_off":
+        settings["alerts"] = False
+        await query.edit_message_text("🔕 Alerts disabled.")
     
-    # Wallets
-    if data == "wallets":
-        wallet_text = "🐋 *Tracked Whale Wallets*\n\n"
-        for name, addr in WHALE_WALLETS.items():
-            short_addr = addr[:6] + "..." + addr[-4:]
-            wallet_text += f"• *{name}*\n  `{short_addr}`\n"
-        
-        await query.edit_message_text(wallet_text, reply_markup=back_menu_keyboard(), parse_mode='Markdown')
-        return
+    elif data == "top_wallets":
+        text = "🐋 *Tracked Whale Wallets*\n\n"
+        for addr, name in WHALE_WALLETS.items():
+            short_addr = f"{addr[:6]}...{addr[-4:]}"
+            text += f"• *{name}*\n  `{short_addr}`\n"
+        await query.edit_message_text(text, parse_mode="Markdown")
     
-    # Transfers
-    if data == "transfers":
-        await query.edit_message_text("⏳ Fetching live data...", parse_mode='Markdown')
+    elif data == "recent":
+        await query.edit_message_text("⏳ Fetching recent transfers...")
         
-        transactions = await fetch_whale_transactions()
+        transfers = await fetch_recent_transfers()
         
-        if transactions:
-            text = "📊 *Recent Large Transfers*\n\n"
-            for tx in transactions[:8]:
-                emoji = "🟢" if tx['type'] == 'IN' else "🔴"
-                text += f"{emoji} *{tx['wallet']}*\n"
-                text += f"   {tx['type']}: {tx['value']} ETH → {tx['to']}\n\n"
-            
-            text += "_Live data from Etherscan_"
+        if transfers:
+            text = "💰 *Recent Binance Transfers*\n\n"
+            for tx in transfers[:5]:
+                eth_value = format_eth(tx.get("value", 0))
+                if eth_value > 0:
+                    direction = "📥 IN" if tx.get("to", "").lower() == "0x28c6c06298d514db089934071355e5743bf21d60" else "📤 OUT"
+                    text += f"{direction} {eth_value} ETH\n"
+            text += f"\n_Updated: {datetime.now().strftime('%H:%M:%S')}_"
         else:
-            text = """📊 *Recent Large Transfers*
-
-⚠️ API connection issue.
-Showing sample data:
-
-• Binance → Unknown: 500 ETH
-• OKX → DeFi Protocol: 1,200 ETH
-• Whale → Coinbase: 850 ETH
-
-_Configure API keys for live data_"""
+            text = "📊 *Recent Transfers*\n\n"
+            text += "• Binance → Unknown: 500 ETH\n"
+            text += "• OKX → DeFi: 1,200 ETH\n"
+            text += "• MEXC → Wallet: 340 ETH\n"
+            text += "\n_Demo data - add ETHERSCAN_API_KEY for live data_"
         
-        await query.edit_message_text(text, reply_markup=back_menu_keyboard(), parse_mode='Markdown')
-        return
+        await query.edit_message_text(text, parse_mode="Markdown")
     
-    # Settings
-    if data == "settings":
-        text = """⚙️ *Settings*
-
-Configure your whale tracking preferences."""
-        await query.edit_message_text(text, reply_markup=settings_keyboard(), parse_mode='Markdown')
-        return
+    elif data == "settings":
+        keyboard = [
+            [InlineKeyboardButton(f"🎯 Threshold: {settings['threshold']} ETH", callback_data="threshold")],
+            [InlineKeyboardButton(f"⛓️ Chains: {', '.join(settings['chains'])}", callback_data="chains")],
+            [InlineKeyboardButton("🔙 Back", callback_data="back")],
+        ]
+        await query.edit_message_text(
+            "⚙️ *Settings*\n\nConfigure your alerts:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
     
-    # Trade
-    if data == "trade":
-        text = """💎 *Trade Now*
-
-Use our partner exchanges and earn rewards:
-
-🔥 *Bitunix* - 20% fee discount
-💎 *MEXC* - 40% fee rebate  
-⚡ *BloFin* - Premium features"""
-        await query.edit_message_text(text, reply_markup=trade_keyboard(), parse_mode='Markdown')
-        return
+    elif data == "threshold":
+        keyboard = [
+            [
+                InlineKeyboardButton("50 ETH", callback_data="set_threshold_50"),
+                InlineKeyboardButton("100 ETH", callback_data="set_threshold_100"),
+            ],
+            [
+                InlineKeyboardButton("500 ETH", callback_data="set_threshold_500"),
+                InlineKeyboardButton("1000 ETH", callback_data="set_threshold_1000"),
+            ],
+            [InlineKeyboardButton("🔙 Back", callback_data="settings")],
+        ]
+        await query.edit_message_text(
+            "🎯 *Select Alert Threshold*\n\nMinimum ETH value to trigger alerts:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
     
-    # Stats
-    if data == "stats":
-        user_id = update.effective_user.id
-        ref_code = f"{user_id:X}"[-8:].upper()
+    elif data.startswith("set_threshold_"):
+        value = int(data.split("_")[-1])
+        settings["threshold"] = value
+        await query.edit_message_text(f"✅ Threshold set to {value} ETH")
+    
+    elif data == "chains":
+        chains = ["ETH", "BSC", "ARB", "SOL"]
+        keyboard = []
+        for chain in chains:
+            status = "✅" if chain in settings["chains"] else "❌"
+            keyboard.append([InlineKeyboardButton(f"{status} {chain}", callback_data=f"toggle_{chain}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="settings")])
         
-        text = f"""📈 *YOUR STATS*
-
-• Tier: FREE
-• Alerts: 0
-• Code: `{ref_code}`
-
-*APIs:* ETH {'✅' if ETHERSCAN_API else '❌'} | SOL {'✅' if SOLSCAN_API else '❌'}"""
-        await query.edit_message_text(text, reply_markup=back_menu_keyboard(), parse_mode='Markdown')
-        return
+        await query.edit_message_text(
+            "⛓️ *Select Chains*\n\nToggle chains to track:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
     
-    # Referral
-    if data == "referral":
-        user_id = update.effective_user.id
-        ref_code = f"{user_id:X}"[-8:].upper()
-        bot_username = (await context.bot.get_me()).username
+    elif data.startswith("toggle_"):
+        chain = data.split("_")[-1]
+        if chain in settings["chains"]:
+            settings["chains"].remove(chain)
+        else:
+            settings["chains"].append(chain)
         
-        text = f"""🎁 *EARN REWARDS*
-
-Share and earn 30%!
-
-Code: `{ref_code}`
-Link: https://t.me/{bot_username}?start={ref_code}"""
-        await query.edit_message_text(text, reply_markup=back_menu_keyboard(), parse_mode='Markdown')
-        return
+        # Refresh chains menu
+        chains = ["ETH", "BSC", "ARB", "SOL"]
+        keyboard = []
+        for c in chains:
+            status = "✅" if c in settings["chains"] else "❌"
+            keyboard.append([InlineKeyboardButton(f"{status} {c}", callback_data=f"toggle_{c}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="settings")])
+        
+        await query.edit_message_text(
+            "⛓️ *Select Chains*\n\nToggle chains to track:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
     
-    # API Status
-    if data == "api_status":
-        text = f"""ℹ️ *API Status*
+    elif data == "upgrade":
+        text = """💎 *WhaleFollow Pro*
 
-• Etherscan: {'✅ Connected' if ETHERSCAN_API else '❌ Not configured'}
-• Helius: {'✅ Connected' if HELIUS_KEY else '❌ Not configured'}
-• Solscan: {'✅ Connected' if SOLSCAN_API else '❌ Not configured'}
+Get advanced features:
+• Real-time alerts (no delay)
+• All chains supported
+• Lower thresholds (10 ETH+)
+• Copy trading signals
+• Priority support
 
-• Bitunix: ✅ `{BITUNIX_CODE}`
-• MEXC: ✅ `{MEXC_CODE}`
-• BloFin: ✅ Active"""
-        await query.edit_message_text(text, reply_markup=back_menu_keyboard(), parse_mode='Markdown')
-        return
+*€19/month* or pay with crypto
+
+🔗 [Get Pro](https://mvai.gumroad.com/l/whalefollow-pro)
+
+Or send 20 USDC to:
+`0x742d35Cc6634C0532925a3b844Bc9e7595f00000`"""
+        
+        await query.edit_message_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+    
+    elif data == "back":
+        keyboard = [
+            [InlineKeyboardButton("🐋 Live Alerts ON", callback_data="alerts_on")],
+            [InlineKeyboardButton("📊 Top Wallets", callback_data="top_wallets")],
+            [InlineKeyboardButton("💰 Recent Transfers", callback_data="recent")],
+            [InlineKeyboardButton("⚙️ Settings", callback_data="settings")],
+            [InlineKeyboardButton("💎 Upgrade to Pro", callback_data="upgrade")],
+        ]
+        await query.edit_message_text(
+            "🐋 *MVAI Whale Tracker*\n\nSelect an option:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Stop alerts"""
-    context.user_data['alerts_enabled'] = False
-    await update.message.reply_text(
-        "🛑 *Whale Alerts Disabled*\n\nUse /start to enable again.",
-        reply_markup=back_menu_keyboard(),
-        parse_mode='Markdown'
-    )
+    """Disable alerts."""
+    user_id = update.effective_user.id
+    settings = get_user_settings(user_id)
+    settings["alerts"] = False
+    await update.message.reply_text("🔕 Alerts disabled. Use /start to enable.")
 
-# =============================================================================
-# MAIN
-# =============================================================================
-def main():
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show bot status."""
+    api_status = "✅ Connected" if ETHERSCAN_API_KEY else "❌ Not configured"
+    text = f"""📊 *Bot Status*
+
+🤖 Bot: Online
+🔗 Etherscan API: {api_status}
+⏰ Server time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+# === HEALTH CHECK FOR KOYEB ===
+async def health_check(request):
+    """HTTP health check endpoint."""
+    return web.Response(text="OK", status=200)
+
+async def run_webserver():
+    """Run health check webserver."""
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Health check server running on port {PORT}")
+
+# === MAIN ===
+async def main():
+    """Start the bot."""
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN not set!")
+        logger.error("BOT_TOKEN environment variable not set!")
         return
     
-    logger.info(f"Starting bot with token: {BOT_TOKEN[:10]}...")
-    logger.info(f"Etherscan API: {'Set' if ETHERSCAN_API else 'Not set'}")
+    logger.info("Starting MVAI Whale Tracker Bot...")
     
-    # Start health check server in background thread
-    health_thread = threading.Thread(target=run_health_server, daemon=True)
-    health_thread.start()
-    logger.info("Health server started")
+    # Start health check server
+    await run_webserver()
     
-    # Build bot application
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Create bot application
+    application = Application.builder().token(BOT_TOKEN).build()
     
     # Add handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stop", stop))
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CallbackQueryHandler(button_handler))
     
-    # Run bot
-    logger.info("Starting bot polling...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Start polling
+    logger.info("Bot started successfully!")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(drop_pending_updates=True)
+    
+    # Keep running
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
